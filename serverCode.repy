@@ -1,0 +1,134 @@
+# Description: generates the html needed to show all the messages in the board.
+# Input: void.
+# Output: return a string with the html code for the webpage.
+def generate_html_page():
+  board = mycontext['board']
+  board = '\n<br>'.join(map(str, board))
+  htmlresponse = "".join([mycontext['header'], board, mycontext['footer']])
+  return htmlresponse
+
+# Description: sends the new message to the other nodes.
+# Input: string with the new message.
+# Output: void.
+def send_to_other_nodes(msgheader):
+  message = msgheader[(msgheader.find('comment=') + len('comment=')):]
+  #Adquire the lock before accessing the critical section
+  mycontext['lock'].acquire()
+  mycontext['msg_max_id'] = mycontext['msg_max_id'] + 1
+  newRow = {}
+  newRow['msg_id'] = mycontext['msg_max_id']
+  newRow['msg_ip'] = mycontext['my_ip']  
+  newRow['msg_text'] = message
+  mycontext['msg_info'].append(newRow)
+  mycontext['startTime'] = getruntime()
+  for node in mycontext['nodes']:
+    socketobject = openconn(node, mycontext['port'])
+    socketobject.send('received_comment=' + message + '&' + str(mycontext['msg_max_id']))
+    socketobject.close()
+  #Release the lock after accessing the critical section
+  mycontext['lock'].release()
+
+# Description: receives the new message from the other nodes and adds it to the list of messages.
+# Input: string with the new message, string with the ip.
+# Output: void.
+def receive_message(msgheader, ip):
+  message = msgheader[(msgheader.find('comment=') + len('comment=')):]
+  split_message = message.split('&')
+  #Adquire the lock before accessing the critical section
+  mycontext['lock'].acquire()
+  if mycontext['msg_max_id']<int(split_message[1]):
+    mycontext['msg_max_id']=int(split_message[1])
+  newRow = {}
+  newRow['msg_text'] = split_message[0]
+  newRow['msg_id'] = int(split_message[1])
+  newRow['msg_ip'] = ip
+  mycontext['msg_info'].append(newRow)
+  if len(mycontext['msg_info']) ==  6:
+    mycontext['endTime'] = getruntime()
+    diff = mycontext['startTime'] + mycontext['endTime']
+  #Release the lock after accessing the critical section
+  mycontext['lock'].release()
+
+# Description: Appends the messages to the board ordered by ID and IP.
+# Input: void.
+# Output: void.
+def append_to_board():
+  #Adquire the lock before accessing the critical section
+  mycontext['lock'].acquire()
+  mycontext['msg_info'].sort()
+  mycontext['board'] = []
+  for row in mycontext['msg_info']:
+    mycontext['board'].append(row['msg_text'])
+  #Release the lock after accessing the critical section
+  mycontext['lock'].release()
+  
+# Description: calls the generate_html_page() function, sends that html received code to the client and closes the communication.
+# Input: socket object of the connection, the remote user connection.
+# Output: void.
+def load_page(sockobj, thiscommhandle):
+  htmlresponse = generate_html_page()
+  sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+  "Content-length: %i\r\n\r\n%s" % (len(htmlresponse), htmlresponse))
+  stopcomm(thiscommhandle)
+
+# Description: handles the incoming connections and executes different functions depending on the type of connection.
+# Input: string IP of the client, integer PORT of the client, socket object, the remote user connection, lstener object of the communication.
+# Output: void.
+def board(ip, port, sockobj, thiscommhandle, listencommhandle):
+  try:
+    msgheader = sockobj.recv(1024) # Receive message,
+    # React depending on message type: HTTP GET or POST, or some other type of communication.
+    if msgheader.startswith('GET'):        #If the received message is a GET, responde with the httml of the webpage
+      load_page(sockobj, thiscommhandle)
+    elif msgheader.startswith('POST'):     #If the received message is a POST, new message submitted in this vesssel
+      if mycontext['first']:
+        mycontext['board'].remove("empty")
+        mycontext['first'] = False
+      if 'comment=' in msgheader:
+        send_to_other_nodes(msgheader)
+        append_to_board()
+        load_page(sockobj, thiscommhandle)
+    else:                                  #If it is other type, new message coming from other vessel
+      if mycontext['first']:
+        mycontext['board'].remove("empty")
+        mycontext['first'] = False
+      receive_message(msgheader, ip)
+      append_to_board()
+      stopcomm(thiscommhandle)
+  except Exception, e:
+ 
+if callfunc == 'initialize':
+
+  mycontext['port'] = 63161
+  mycontext['my_ip'] = getmyip()
+  mycontext['first'] = True      #Saves whether it is first message comming to the vessel
+  mycontext['nodes'] = []
+  mycontext['header'] = file("header.html").read()
+  mycontext['board'] = ["empty"] #Variable that stores the messages submitted
+  mycontext['footer'] = file("footer.html").read()
+  mycontext['msg_max_id']= 0;    #Variable that saves the ID of the last messaged submitted/received
+  mycontext['msg_info']= []
+  mycontext['lock'] = getlock()  #Lock that will protect the access to the critical area
+  mycontext['startTime'] = 0     #Variable to set the start time of the vessel, for performance statistics
+  mycontext['endTime'] = 0       #Variable to set the ending time of the vessel, for performance statistics
+
+  addressFile = open("nodesIP.txt", 'r')  #Open the file with the IP addresses of the vessels
+  for line in addressFile:
+    if line[:-1] != mycontext['my_ip']:
+      mycontext['nodes'].append(line[:-1])
+		
+  addressFile.close()
+
+  if len(callargs) > 1:
+    raise Exception("Too many call arguments")
+
+  # Running remotely (assuming that we pass input argument only remotely):
+  # whenever this vessel gets a connection on its IPaddress:Clearinghouseport
+  # it'll call function board
+  elif len(callargs) == 1:
+    port = int(callargs[0])
+    ip = mycontext['my_ip']
+  else:
+    port = 12345
+    ip = '127.0.0.1'
+  listencommhandle = waitforconn(ip,port,board)
